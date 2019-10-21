@@ -1,0 +1,11 @@
+(library
+  (name parser_test)
+  (ocamlopt_flags -linkall -g)
+  (libraries parser rely.lib)
+  (modules (:standard \ ParserRunTests)))
+
+(executable
+  (name ParserRunTests)
+  (public_name ParserRunTests.exe)
+  (libraries parser_test)
+  (modules ParserRunTests))
