@@ -1,8 +1,10 @@
 open Base
 open Ast.Syntax
 
+module StringMap = Map.M (String)
+module StringSet = Set.M (String)
+
 module Env = struct
-  module StringMap = Map.M (String)
   type t = type_signature StringMap.t
 
   let empty: t = Map.empty (module String)
@@ -11,23 +13,54 @@ module Env = struct
   let remove (m: t) (k: String.t): t = Map.remove m k
 end
 
+module Substitution = struct
+  type t = type_signature StringMap.t
+
+  let null: t = Map.empty (module String)
+
+  (** Apply substitutions to a type *)
+  let rec apply (subst: t) (t: type_signature) =
+    match t.item with
+    | TypeVar v ->
+      Map.find subst v |> Option.value ~default:t
+    | TypeArrow (t1, t2) -> {
+      item = TypeArrow (apply subst t1, apply subst t2); 
+      location = t.location
+    }
+    | TypeTuple ts -> {
+      item = TypeTuple (List.map ~f:(apply subst) ts);
+      location = t.location;
+    }
+    | _ -> t
+
+  (** Given two substitutions, merge them and try to apply any possible substitutions *)
+  let compose (s1: t) (s2: t) = Map.merge (Map.map ~f:(apply s1) s2) s1
+
+  let rec free_type_vars (t: type_signature): StringSet.t = 
+    match t.item with
+    | TypeVar a -> Set.singleton (module String) a
+    | TypeArrow (t1, t2) ->
+        Set.union (free_type_vars t1) (free_type_vars t2)
+    | TypeTuple ts ->
+        ts |> List.map ~f:free_type_vars |> Set.union_list (module String)
+    | _ -> Set.empty (module String)
+end
+
 type location = Lexing.position * Lexing.position
 
 type err =
   | VariableNotFound of { id: string; location: location }
-  | WrongNumberOfArgs of { expected: int; recieved: int; location: location }
-  | Unimplemented
+  | Unimplemented of string
 
 let err_to_string e =
   match e with
   | VariableNotFound { id; _ } -> Printf.sprintf "Variable '%s' not found" id
-  | WrongNumberOfArgs _ -> "Unexpected number of arguments"
-  | Unimplemented -> "Unimplemented"
+  | Unimplemented s -> Printf.sprintf "Unimplemented: %s" s
 
 let instantiate (t: type_signature) =
   match t.item with
   | TypeIdent _ -> Ok t
-  | _ -> Error Unimplemented
+  | _ -> Error (Unimplemented "instantiate")
 
 let locate (p: 'a) : 'a located = { item = p; location = (Lexing.dummy_pos, Lexing.dummy_pos) }
 
@@ -46,6 +79,12 @@ let new_type_var () : type_signature =
 let arrow_type param_types return_type =
   List.fold_right ~init:return_type ~f:(fun l r -> locate (TypeArrow (l, r))) param_types
 
+let generalise t = t
+
+let unify t1 t2 = Error (Unimplemented "unify")
+
+let var_bind name t = Error (Unimplemented "var_bind")
+
 let rec infer (env: Env.t) (expr: expression) =
   match expr.item with
   | ExprIdent id -> ( 
@@ -60,4 +99,19 @@ let rec infer (env: Env.t) (expr: expression) =
       | Ok return_type -> Ok ((arrow_type param_types) return_type)
       | e -> e
   )
-  | _ -> Error Unimplemented
+  | ExprValBinding (pattern, value_expr, body_expr) -> (
+    match pattern.item with
+    | PatternVar var_name -> (
+      infer env value_expr
+      |> Result.map ~f:generalise
+      |> Result.bind ~f:(fun generalised_t ->
+        infer (Env.set env var_name generalised_t) body_expr
+      )
+    )
+    | _ -> Error (Unimplemented "infer val binding for pattern")
+  )
+  | ExprApply (fn_expr, args) -> (
+    
+    Error (Unimplemented "infer apply") 
+  )
+  | _ -> Error (Unimplemented "infer")
