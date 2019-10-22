@@ -48,13 +48,16 @@ let arrow_type param_types return_type =
 
 let rec infer (env: Env.t) (expr: expression) =
   match expr.item with
-  | ExprIdent id ->
-      Map.find env id
-      |> Result.of_option ~error:(VariableNotFound { id; location = expr.location })
-      |> Result.bind ~f:instantiate
-  | ExprFn (param_ids, body_expr) ->
+  | ExprIdent id -> ( 
+      match (Map.find env id) with
+      | Some (t) -> instantiate t
+      | None -> Error (VariableNotFound { id; location = expr.location })
+  )
+  | ExprFn (param_ids, body_expr) -> (
       let param_types = List.map ~f:(fun _ -> new_type_var ()) param_ids in
       let fn_env = List.fold2_exn ~init:env ~f:Env.set param_ids param_types in
-      let return_type = infer fn_env body_expr in
-      Result.map ~f:(arrow_type param_types) return_type
+      match infer fn_env body_expr with
+      | Ok return_type -> Ok ((arrow_type param_types) return_type)
+      | e -> e
+  )
   | _ -> Error Unimplemented
