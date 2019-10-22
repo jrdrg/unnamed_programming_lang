@@ -6,7 +6,7 @@ module Env = struct
   type t = type_signature StringMap.t
 
   let empty: t = Map.empty (module String)
-  let set (m: t) (k: String.t) (v: type_signature): t = Map.set m k v
+  let set (m: t) (k: String.t) (v: type_signature): t = Map.set m ~key:k ~data:v
   let find (m: t) (k: String.t): type_signature Option.t = Map.find m k
   let remove (m: t) (k: String.t): t = Map.remove m k
 end
@@ -20,7 +20,7 @@ type err =
 
 let err_to_string e =
   match e with
-  | VariableNotFound { id } -> Printf.sprintf "Variable '%s' not found" id
+  | VariableNotFound { id; _ } -> Printf.sprintf "Variable '%s' not found" id
   | WrongNumberOfArgs _ -> "Unexpected number of arguments"
   | Unimplemented -> "Unimplemented"
 
