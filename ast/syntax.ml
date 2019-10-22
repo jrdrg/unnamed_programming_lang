@@ -16,8 +16,6 @@ type constant =
 (** A type signature *)
 and type_signature = type_signature_ located
 and type_signature_ =
-  | TypeAny
-  (* _ *)
   | TypeVar of string
   (* a *)
   | TypeIdent of string
@@ -96,7 +94,6 @@ and expression_ =
 
 let rec type_signature_to_string ts =
   match ts.item with
-  | TypeAny -> "_"
   | TypeVar x -> x
   | TypeIdent x -> x
   | TypeConstructor (x, xs) ->

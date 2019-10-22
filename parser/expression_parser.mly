@@ -143,7 +143,6 @@ atomic_type:
       { TypeRecord (fs, ext) }
   | t=UIDENT ts=nonempty_list(l(type_signature)) { TypeConstructor (t, ts) }
   | "(" t=type_signature ")" { t }
-  | "_" { TypeAny }
   | LIDENT { TypeVar $1 }
   | UIDENT { TypeIdent $1 }
 
