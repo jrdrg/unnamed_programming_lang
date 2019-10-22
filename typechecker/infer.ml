@@ -16,7 +16,8 @@ end
 module Substitution = struct
   type t = type_signature StringMap.t
 
-  let null: t = Map.empty (module String)
+  let null : t = Map.empty (module String)
+  let singleton s t : t = Map.singleton (module String) s t
 
   (** Apply substitutions to a type *)
   let rec apply (subst: t) (t: type_signature) =
@@ -50,11 +51,13 @@ type location = Lexing.position * Lexing.position
 
 type err =
   | VariableNotFound of { id: string; location: location }
+  | FailedOccurCheck
   | Unimplemented of string
 
 let err_to_string e =
   match e with
   | VariableNotFound { id; _ } -> Printf.sprintf "Variable '%s' not found" id
+  | FailedOccurCheck -> "Failed Occur Check"
   | Unimplemented s -> Printf.sprintf "Unimplemented: %s" s
 
 let instantiate (t: type_signature) =
@@ -81,9 +84,21 @@ let arrow_type param_types return_type =
 
 let generalise t = t
 
-let unify t1 t2 = Error (Unimplemented "unify")
+(** Given a type variable's name, and another type, get the substitutions *)
+let var_bind name t =
+  match (name, t.item) with
+  (* If name is the same as a TypeVar then we don't know any substitutions *)
+  | (name, TypeVar m) when String.equal name m ->
+      Ok Substitution.null
+  
+  (* If name is found in the free type variables of t, then fail *)
+  | (name, _) when Set.mem (Substitution.free_type_vars t) name ->
+      Error FailedOccurCheck
+  
+  (* Otherwise substitute name with the type *)
+  | _ -> Ok (Substitution.singleton name t)
 
-let var_bind name t = Error (Unimplemented "var_bind")
+let unify t1 t2 = Error (Unimplemented "unify")
 
 let rec infer (env: Env.t) (expr: expression) =
   match expr.item with
