@@ -35,7 +35,11 @@ module Substitution = struct
     | _ -> t
 
   (** Given two substitutions, merge them and try to apply any possible substitutions *)
-  let compose (s1: t) (s2: t) = Map.merge (Map.map ~f:(apply s1) s2) s1
+  let compose (s1: t) (s2: t) =
+    Map.merge
+      ~f:(fun ~key:_ x -> match x with `Left v | `Right v | `Both (_, v) -> Some v)
+      (Map.map ~f:(apply s1) s2)
+      s1
 
   let rec free_type_vars (t: type_signature): StringSet.t = 
     match t.item with
@@ -52,12 +56,16 @@ type location = Lexing.position * Lexing.position
 type err =
   | VariableNotFound of { id: string; location: location }
   | FailedOccurCheck
+  | UnequalConstructorLengths
+  | TypeMismatch
   | Unimplemented of string
 
 let err_to_string e =
   match e with
   | VariableNotFound { id; _ } -> Printf.sprintf "Variable '%s' not found" id
   | FailedOccurCheck -> "Failed Occur Check"
+  | UnequalConstructorLengths -> "Unequal Constructor Lengths"
+  | TypeMismatch -> "Type Mismatch"
   | Unimplemented s -> Printf.sprintf "Unimplemented: %s" s
 
 let instantiate (t: type_signature) =
@@ -98,7 +106,78 @@ let var_bind name t =
   (* Otherwise substitute name with the type *)
   | _ -> Ok (Substitution.singleton name t)
 
-let unify t1 t2 = Error (Unimplemented "unify")
+let locate p = { item = p; location = (Lexing.dummy_pos, Lexing.dummy_pos) }
+
+let%test_module "var_bind" = (module struct
+  let%expect_test "name and type var are equal" =
+    match var_bind "x" (locate (TypeVar "x")) with
+    | Ok subs -> Stdio.printf "%i\n" (Map.length subs)
+    | _ -> Stdio.print_endline "Error";
+    [%expect {| 0 |}]
+  
+  let%expect_test "free type variables return error" =
+    let t = TypeArrow (locate (TypeVar "x"), locate (TypeVar "y")) |> locate in
+    match var_bind "x" t with
+    | Ok subs -> Stdio.printf "%i\n" (Map.length subs)
+    | _ -> Stdio.print_endline "Error";
+    [%expect {| Error |}]
+  
+  let%expect_test "x can be substitued" =
+    match var_bind "x" (locate (TypeIdent "Int")) with
+    | Ok subs -> Map.length subs |> Int.to_string |> Stdio.print_endline
+    | _ -> Stdio.print_endline "Error";
+    [%expect {| 1 |}]
+end)
+
+let rec unify (t1: type_signature) (t2: type_signature) =
+  match (t1.item, t2.item) with
+  | (TypeArrow (arg1, ret1), TypeArrow (arg2, ret2)) ->
+      unify arg1 arg2 |> Result.bind ~f:(fun s1 ->
+        unify (Substitution.apply s1 ret1) (Substitution.apply s1 ret2)
+        |> Result.map ~f:(fun s2 -> Substitution.compose s2 s1)
+      )
+
+  | (_, TypeVar n) -> var_bind n t1
+  | (TypeVar n, _) -> var_bind n t2
+
+  | (TypeIdent x, TypeIdent y) when String.equal x y ->
+      Ok Substitution.null
+
+  | (TypeConstructor (x, x_args), TypeConstructor (y, y_args)) when String.equal x y -> (
+      let folder acc x_ y_ =
+        match acc with
+        | Ok s1 ->
+            unify (Substitution.apply s1 x_) (Substitution.apply s1 y_)
+            |> Result.map ~f:(fun s2 -> Substitution.compose s2 s1)
+        | e -> e
+      in
+      let s = List.fold2 ~f:folder ~init:(Ok Substitution.null) x_args y_args in
+      match s with
+      | Ok (Ok subs) -> Ok subs
+      | Ok e -> e
+      | Unequal_lengths -> Error UnequalConstructorLengths
+  )
+  | _ -> Error TypeMismatch
+
+let%test_module "unify" = (module struct
+  let%expect_test "Can unify ident with var" =
+    let t1 = locate (TypeIdent "Test") in
+    let t2 = locate (TypeVar "x") in
+    unify t1 t2
+    |> Result.ok
+    |> Option.bind ~f:(fun subs -> Map.find subs "x")
+    |> Option.map ~f:type_signature_to_string
+    |> Option.iter ~f:(Stdio.print_endline);
+    [%expect {| Test |}]
+  
+  let%expect_test "Can unify two arrows that are the same" =
+    let t1 = locate (TypeArrow (locate (TypeIdent "Int"), locate (TypeIdent "String"))) in
+    let t2 = locate (TypeArrow (locate (TypeIdent "Int"), locate (TypeIdent "String"))) in
+    unify t1 t2
+    |> Result.map ~f:Map.length
+    |> Result.iter ~f:(Stdio.printf "%d\n");
+    [%expect {| 0 |}]
+end)
 
 let rec infer (env: Env.t) (expr: expression) =
   match expr.item with
@@ -125,7 +204,7 @@ let rec infer (env: Env.t) (expr: expression) =
     )
     | _ -> Error (Unimplemented "infer val binding for pattern")
   )
-  | ExprApply (fn_expr, args) -> (
+  | ExprApply (_fn_expr, _args) -> (
     
     Error (Unimplemented "infer apply") 
   )
