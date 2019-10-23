@@ -37,6 +37,7 @@ and Scheme: sig
   type t = Forall of string list * Type.t
   val apply: Substitution.t -> t -> t
   val free_type_vars: t -> StringSet.t
+  val to_string: t -> string
 end = struct
   type t = Forall of string list * Type.t
 
@@ -52,6 +53,14 @@ end = struct
       let ftv_s = Set.of_list (module String) vars in
       let ftv_t = Type.free_type_vars t in
       Set.diff ftv_s ftv_t
+  
+  let to_string (scheme: t): string =
+    match scheme with
+    | Forall (vars, t) ->
+        Printf.sprintf "forall %s. %s"
+          (String.concat ~sep:" " vars)
+          (Type.to_string t)
+
 end
 
 and Env: sig 
@@ -157,10 +166,12 @@ let generalise (env: Env.t) (t: Type.t) =
   let vars = Set.diff ftv_t ftv_e |> Set.to_list in
   Scheme.Forall (vars, t)
 
+(* TODO: This is probably gonna conflict with type vars made in infer *)
 let instantiate (scheme: Scheme.t) =
   match scheme with
-  | Forall (_, ({ item = TypeIdent _; _ } as t)) -> Ok t
-  | _ -> Error (Unimplemented "instantiate")
+  | Forall (vars, t) ->
+    let subs = List.fold ~init:Substitution.null ~f:(fun acc v -> Map.set acc ~key:v ~data:(new_type_var ())) vars in
+    Type.apply subs t
 
 (** Given a type variable's name, and another type, get the substitutions *)
 let var_bind name t =
@@ -297,56 +308,81 @@ let%test_module "unify" = (module struct
     [%expect {| a = Int, b = Bool, c = String |}]
 end)
 
-(** Create a TypeArrow from a list of parameter types *)
+let new_tvar last_id : Type.t =
+  TypeVar (Printf.sprintf "t%d" (last_id + 1)) |> locate
 
-let arrow_type subs param_types return_type =
-  List.fold_right
-    ~init:return_type
-    ~f:(fun l r ->
-      locate (TypeArrow (Type.apply subs l, r))
-    )
-    param_types
-
-let rec infer (env: Env.t) (expr: expression): ((Substitution.t * Type.t), err) Result.t =
+let rec infer (env: Env.t) (expr: expression) (last_id: int): ((Substitution.t * Type.t * int), err) Result.t =
   match expr.item with
   | ExprUnit -> 
-      Ok (Substitution.null, locate TypeUnit)
+      Ok (Substitution.null, locate TypeUnit, last_id + 1)
+  | ExprConstant const ->
+    Ok (
+      Substitution.null, 
+      (match const with 
+      | ConstNumber _ -> locate (TypeIdent "Number")
+      | ConstString _ -> locate (TypeIdent "String")),
+      last_id + 1
+     )
   | ExprIdent id -> (
       match (Map.find env id) with
-      | Some (t) -> instantiate t |> Result.map ~f:(fun t_ -> (Substitution.null, t_))
+      | Some (t) -> Ok (Substitution.null, instantiate t, last_id + 1)
       | None -> Error (VariableNotFound { id; location = expr.location })
   )
   | ExprFn (param_id, body_expr) -> (
-      let tvar = new_type_var () in
+      let tvar = new_tvar last_id in
       let fn_env = Map.set env ~key:param_id ~data:(Scheme.Forall ([], tvar)) in
-      let%bind (subs, return_type) = infer fn_env body_expr in
-      Ok (subs, TypeArrow (Type.apply subs tvar, return_type) |> locate)
+      let%bind (subs, return_type, _) = infer fn_env body_expr (last_id + 1) in
+      Ok (subs, TypeArrow (Type.apply subs tvar, return_type) |> locate, last_id + 1)
   )
   | ExprValBinding (pattern, value_expr, body_expr) -> (
     match pattern.item with
     | PatternVar var_name -> (
-      let%bind (value_subs, value_type) = infer env value_expr in
+      let%bind (value_subs, value_type, last_id) = infer env value_expr (last_id + 1) in
       let env_ = Env.apply value_subs env in
       let value_type_ = generalise env_ value_type in
-      let%bind (body_subs, body_type) = infer (Env.set env_ var_name value_type_) body_expr in
-      Ok (Substitution.compose value_subs body_subs, body_type)
+      let%bind (body_subs, body_type, _) = infer (Env.set env_ var_name value_type_) body_expr (last_id + 1) in
+      Ok (Substitution.compose value_subs body_subs, body_type, last_id + 1)
     )
     | _ -> Error (Unimplemented "infer val binding for pattern")
   )
   | ExprApply (fn_expr, arg_expr) -> (
-    let tvar = new_type_var () in
-    let%bind (fn_subs, fn_type) = infer env fn_expr in
-    let%bind (body_subs, body_type) = infer (Env.apply fn_subs env) arg_expr in
+    let tvar = new_tvar last_id in
+    let%bind (fn_subs, fn_type, last_id) = infer env fn_expr (last_id + 1) in
+    let%bind (body_subs, body_type, _) = infer (Env.apply fn_subs env) arg_expr (last_id + 1) in
     let%bind rt_subs = unify (Type.apply body_subs fn_type) (TypeArrow (body_type, tvar) |> locate) in
-    Ok (Substitution.compose rt_subs (Substitution.compose body_subs fn_subs), Type.apply rt_subs tvar)
+    Ok (Substitution.compose rt_subs (Substitution.compose body_subs fn_subs), Type.apply rt_subs tvar, last_id + 1)
+  )
+  | ExprInfix (lhs, op, rhs) -> (
+    let%bind (lhs_subs, lhs_t, last_id) = infer env lhs (last_id + 1) in
+    let%bind (rhs_subs, rhs_t, last_id) = infer env rhs (last_id + 1) in
+    let%bind (_, op_t, _) = infer env (ExprIdent op |> locate) (last_id + 1) in
+    let tvar = new_tvar last_id in
+    let%bind rt_subs = unify (TypeArrow (lhs_t, (TypeArrow (rhs_t, tvar) |> locate)) |> locate) op_t in
+    Ok (Substitution.compose lhs_subs (Substitution.compose rhs_subs rt_subs), Type.apply rt_subs tvar, last_id + 1)
   )
   | _ -> Error (Unimplemented "infer")
 
 
-let%test_module "infer" = (module struct
+let infer_type (env: Env.t) (expr: expression): (Type.t, err) Result.t =
+  infer env expr 0 |> Result.map ~f:(fun (subs, t, _) -> Type.apply subs t)
+
+let%test_module "infer_type" = (module struct
   let%expect_test "first try" =
-    let expr = ExprFn ("a", locate ExprUnit) |> locate in
-    infer (Env.empty) expr
-    |> Result.iter ~f:(fun (_subs, t) -> Stdio.print_endline (Type.to_string t));
-    [%expect {| t0 -> () |}]
+    let const = ExprConstant (ConstNumber 3.) |> locate in
+    let fn = ExprFn ("a", locate ExprUnit) |> locate in
+    let app = ExprApply (fn, const) |> locate in
+    infer_type (Env.empty) app
+    |> Result.iter ~f:(fun t -> Type.to_string t |> Stdio.print_endline);
+    [%expect {| () |}]
+
+  let%expect_test "operators!" =
+    let num_t = TypeIdent "Number" |> locate in
+    let plus_t = TypeArrow (num_t, TypeArrow (num_t, num_t) |> locate) |> locate in
+    let env = Env.set Env.empty "+" (Scheme.Forall ([], plus_t)) in
+    let const_a = ExprConstant (ConstNumber 3.) |> locate in 
+    let const_b = ExprConstant (ConstNumber 7.) |> locate in
+    let expr = ExprInfix (const_a, "+", const_b) |> locate in
+    infer_type env expr
+    |> Result.iter ~f:(fun t -> Type.to_string t |> Stdio.print_endline);
+    [%expect {| Number |}]
 end)
