@@ -1,6 +1,8 @@
 open Base
 open Ast.Syntax
 
+open Result.Let_syntax
+
 module StringMap = Map.M (String)
 module StringSet = Set.M (String)
 
@@ -19,19 +21,28 @@ module Substitution = struct
   let null : t = Map.empty (module String)
   let singleton s t : t = Map.singleton (module String) s t
 
+  let to_string (s: t) =
+    Map.to_alist s
+    |> List.map ~f:(fun (v, t) -> Printf.sprintf "%s = %s" v (type_signature_to_string t))
+    |> String.concat ~sep:", "
+
   (** Apply substitutions to a type *)
   let rec apply (subst: t) (t: type_signature) =
     match t.item with
     | TypeVar v ->
       Map.find subst v |> Option.value ~default:t
     | TypeArrow (t1, t2) -> {
-      item = TypeArrow (apply subst t1, apply subst t2);
-      location = t.location
-    }
+        item = TypeArrow (apply subst t1, apply subst t2);
+        location = t.location
+      }
     | TypeTuple ts -> {
-      item = TypeTuple (List.map ~f:(apply subst) ts);
-      location = t.location;
-    }
+        item = TypeTuple (List.map ~f:(apply subst) ts);
+        location = t.location;
+      }
+    | TypeConstructor (n, ts) -> {
+        item = TypeConstructor (n, List.map ~f:(apply subst) ts);
+        location = t.location;
+      }
     | _ -> t
 
   (** Given two substitutions, merge them and try to apply any possible substitutions *)
@@ -55,17 +66,20 @@ type location = Lexing.position * Lexing.position
 
 type err =
   | VariableNotFound of { id: string; location: location }
-  | FailedOccurCheck
-  | UnequalConstructorLengths
-  | TypeMismatch
+  | InfiniteType
+  | UnequalLengths
+  | TypeMismatch of type_signature * type_signature
   | Unimplemented of string
 
 let err_to_string e =
   match e with
   | VariableNotFound { id; _ } -> Printf.sprintf "Variable '%s' not found" id
-  | FailedOccurCheck -> "Failed Occur Check"
-  | UnequalConstructorLengths -> "Unequal Constructor Lengths"
-  | TypeMismatch -> "Type Mismatch"
+  | InfiniteType -> "Infinite Type"
+  | UnequalLengths -> "Unequal Lengths"
+  | TypeMismatch (a, b) ->
+      Printf.sprintf "Cannot unify '%s' with '%s'"
+        (type_signature_to_string a)
+        (type_signature_to_string b)
   | Unimplemented s -> Printf.sprintf "Unimplemented: %s" s
 
 let instantiate (t: type_signature) =
@@ -96,12 +110,12 @@ let generalise t = t
 let var_bind name t =
   match (name, t.item) with
   (* If name is the same as a TypeVar then we don't know any substitutions *)
-  | (name, TypeVar m) when String.equal name m ->
+  | name, TypeVar m when String.equal name m ->
       Ok Substitution.null
 
-  (* If name is found in the free type variables of t, then fail *)
-  | (name, _) when Set.mem (Substitution.free_type_vars t) name ->
-      Error FailedOccurCheck
+  (* If name is found in the free type variables of t, then it fails the occurs check *)
+  | name, _ when Set.mem (Substitution.free_type_vars t) name ->
+      Error InfiniteType
 
   (* Otherwise substitute name with the type *)
   | _ -> Ok (Substitution.singleton name t)
@@ -112,52 +126,50 @@ let%test_module "var_bind" = (module struct
   let%expect_test "name and type var are equal" =
     var_bind "x" (locate (TypeVar "x"))
     |> Result.map ~f:(Map.length)
-    |> Result.iter ~f:(Stdio.printf "%i\n");
+    |> Result.iter ~f:(Stdio.printf "%i");
     [%expect {| 0 |}]
 
   let%expect_test "free type variables return error" =
     let t = TypeArrow (locate (TypeVar "x"), locate (TypeVar "y")) |> locate in
     var_bind "x" t
-    |> Result.map ~f:(Map.length)
-    |> Result.iter_error ~f:(fun _ -> Stdio.printf "Error\n");
+    |> Result.iter_error ~f:(fun _ -> Stdio.printf "Error");
     [%expect {| Error |}]
 
   let%expect_test "x can be substitued" =
     var_bind "x" (locate (TypeIdent "Int"))
-    |> Result.map ~f:(Map.length)
-    |> Result.iter ~f:(Stdio.printf "%i\n");
-    [%expect {| 1 |}]
+    |> Result.ok
+    |> Option.bind ~f:(fun subs -> Map.find subs "x")
+    |> Option.map ~f:type_signature_to_string
+    |> Option.iter ~f:(Stdio.print_endline);
+    [%expect {| Int |}]
 end)
 
 let rec unify (t1: type_signature) (t2: type_signature) =
   match (t1.item, t2.item) with
-  | (TypeArrow (arg1, ret1), TypeArrow (arg2, ret2)) ->
-      unify arg1 arg2 |> Result.bind ~f:(fun s1 ->
-        unify (Substitution.apply s1 ret1) (Substitution.apply s1 ret2)
-        |> Result.map ~f:(fun s2 -> Substitution.compose s2 s1)
-      )
+  | TypeArrow (arg1, ret1), TypeArrow (arg2, ret2) ->
+      let%bind s1 = unify arg1 arg2 in
+      let%map s2 = unify (Substitution.apply s1 ret1) (Substitution.apply s1 ret2) in
+      Substitution.compose s2 s1
 
-  | (_, TypeVar n) -> var_bind n t1
-  | (TypeVar n, _) -> var_bind n t2
+  | _, TypeVar n -> var_bind n t1
+  | TypeVar n, _ -> var_bind n t2
 
-  | (TypeIdent x, TypeIdent y) when String.equal x y ->
+  | TypeIdent x, TypeIdent y when String.equal x y ->
       Ok Substitution.null
 
-  | (TypeConstructor (x, x_args), TypeConstructor (y, y_args)) when String.equal x y -> (
+  | TypeConstructor (x, x_args), TypeConstructor (y, y_args) when String.equal x y -> (
       let folder acc x_ y_ =
-        match acc with
-        | Ok s1 ->
-            unify (Substitution.apply s1 x_) (Substitution.apply s1 y_)
-            |> Result.map ~f:(fun s2 -> Substitution.compose s2 s1)
-        | e -> e
+        let%bind s1 = acc in
+        let%map s2 = unify (Substitution.apply s1 x_) (Substitution.apply s1 y_) in
+        Substitution.compose s2 s1
       in
       let s = List.fold2 ~f:folder ~init:(Ok Substitution.null) x_args y_args in
       match s with
       | Ok (Ok subs) -> Ok subs
       | Ok e -> e
-      | Unequal_lengths -> Error UnequalConstructorLengths
+      | Unequal_lengths -> Error UnequalLengths
   )
-  | _ -> Error TypeMismatch
+  | _ -> Error (TypeMismatch (t1, t2))
 
 let%test_module "unify" = (module struct
   let%expect_test "Can unify ident with var" =
@@ -175,8 +187,35 @@ let%test_module "unify" = (module struct
     let t2 = locate (TypeArrow (locate (TypeIdent "Int"), locate (TypeIdent "String"))) in
     unify t1 t2
     |> Result.map ~f:Map.length
-    |> Result.iter ~f:(Stdio.printf "%d\n");
+    |> Result.iter ~f:(Stdio.printf "%d");
     [%expect {| 0 |}]
+
+  let%expect_test "Does not unify two arrows that are different" =
+    let t1 = locate (TypeArrow (locate (TypeIdent "Int"), locate (TypeIdent "String"))) in
+    let t2 = locate (TypeArrow (locate (TypeIdent "Bool"), locate (TypeIdent "String"))) in
+    unify t1 t2
+    |> Result.map_error ~f:err_to_string
+    |> Result.iter_error ~f:Stdio.print_endline;
+    [%expect {| Cannot unify 'Int' with 'Bool' |}]
+
+  let%expect_test "Can unify a generic and specialised arrow" =
+    let t1 = locate (TypeArrow (locate (TypeVar "x"), locate (TypeIdent "String"))) in
+    let t2 = locate (TypeArrow (locate (TypeIdent "Test"), locate (TypeIdent "String"))) in
+    unify t1 t2
+    |> Result.ok
+    |> Option.bind ~f:(fun subs -> Map.find subs "x")
+    |> Option.map ~f:type_signature_to_string
+    |> Option.iter ~f:(Stdio.print_endline);
+    [%expect {| Test |}]
+
+  let%expect_test "Can unify a generic and specialised constructor" =
+    let args1 = [locate (TypeVar "a"); locate (TypeIdent "Bool"); locate (TypeVar "c")] in
+    let args2 = [locate (TypeIdent "Int"); locate (TypeVar "b"); locate (TypeIdent "String")] in
+    let t1 = locate (TypeConstructor ("Test", args1)) in
+    let t2 = locate (TypeConstructor ("Test", args2)) in
+    unify t1 t2
+    |> Result.iter ~f:(fun s -> Substitution.to_string s |> Stdio.print_endline);
+    [%expect {| val = Int, err = String |}]
 end)
 
 let rec infer (env: Env.t) (expr: expression) =
