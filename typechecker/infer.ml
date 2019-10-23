@@ -25,7 +25,7 @@ module Substitution = struct
     | TypeVar v ->
       Map.find subst v |> Option.value ~default:t
     | TypeArrow (t1, t2) -> {
-      item = TypeArrow (apply subst t1, apply subst t2); 
+      item = TypeArrow (apply subst t1, apply subst t2);
       location = t.location
     }
     | TypeTuple ts -> {
@@ -41,7 +41,7 @@ module Substitution = struct
       (Map.map ~f:(apply s1) s2)
       s1
 
-  let rec free_type_vars (t: type_signature): StringSet.t = 
+  let rec free_type_vars (t: type_signature): StringSet.t =
     match t.item with
     | TypeVar a -> Set.singleton (module String) a
     | TypeArrow (t1, t2) ->
@@ -98,11 +98,11 @@ let var_bind name t =
   (* If name is the same as a TypeVar then we don't know any substitutions *)
   | (name, TypeVar m) when String.equal name m ->
       Ok Substitution.null
-  
+
   (* If name is found in the free type variables of t, then fail *)
   | (name, _) when Set.mem (Substitution.free_type_vars t) name ->
       Error FailedOccurCheck
-  
+
   (* Otherwise substitute name with the type *)
   | _ -> Ok (Substitution.singleton name t)
 
@@ -110,22 +110,22 @@ let locate p = { item = p; location = (Lexing.dummy_pos, Lexing.dummy_pos) }
 
 let%test_module "var_bind" = (module struct
   let%expect_test "name and type var are equal" =
-    match var_bind "x" (locate (TypeVar "x")) with
-    | Ok subs -> Stdio.printf "%i\n" (Map.length subs)
-    | _ -> Stdio.print_endline "Error";
+    var_bind "x" (locate (TypeVar "x"))
+    |> Result.map ~f:(Map.length)
+    |> Result.iter ~f:(Stdio.printf "%i\n");
     [%expect {| 0 |}]
-  
+
   let%expect_test "free type variables return error" =
     let t = TypeArrow (locate (TypeVar "x"), locate (TypeVar "y")) |> locate in
-    match var_bind "x" t with
-    | Ok subs -> Stdio.printf "%i\n" (Map.length subs)
-    | _ -> Stdio.print_endline "Error";
+    var_bind "x" t
+    |> Result.map ~f:(Map.length)
+    |> Result.iter_error ~f:(fun _ -> Stdio.printf "Error\n");
     [%expect {| Error |}]
-  
+
   let%expect_test "x can be substitued" =
-    match var_bind "x" (locate (TypeIdent "Int")) with
-    | Ok subs -> Map.length subs |> Int.to_string |> Stdio.print_endline
-    | _ -> Stdio.print_endline "Error";
+    var_bind "x" (locate (TypeIdent "Int"))
+    |> Result.map ~f:(Map.length)
+    |> Result.iter ~f:(Stdio.printf "%i\n");
     [%expect {| 1 |}]
 end)
 
@@ -169,7 +169,7 @@ let%test_module "unify" = (module struct
     |> Option.map ~f:type_signature_to_string
     |> Option.iter ~f:(Stdio.print_endline);
     [%expect {| Test |}]
-  
+
   let%expect_test "Can unify two arrows that are the same" =
     let t1 = locate (TypeArrow (locate (TypeIdent "Int"), locate (TypeIdent "String"))) in
     let t2 = locate (TypeArrow (locate (TypeIdent "Int"), locate (TypeIdent "String"))) in
@@ -181,7 +181,7 @@ end)
 
 let rec infer (env: Env.t) (expr: expression) =
   match expr.item with
-  | ExprIdent id -> ( 
+  | ExprIdent id -> (
       match (Map.find env id) with
       | Some (t) -> instantiate t
       | None -> Error (VariableNotFound { id; location = expr.location })
@@ -205,7 +205,7 @@ let rec infer (env: Env.t) (expr: expression) =
     | _ -> Error (Unimplemented "infer val binding for pattern")
   )
   | ExprApply (_fn_expr, _args) -> (
-    
-    Error (Unimplemented "infer apply") 
+
+    Error (Unimplemented "infer apply")
   )
   | _ -> Error (Unimplemented "infer")
