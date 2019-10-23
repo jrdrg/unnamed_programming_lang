@@ -144,12 +144,12 @@ let%test_module "var_bind" = (module struct
     [%expect {| Int |}]
 end)
 
+(** Given two types, determine if they can unify and return any possible
+    type variable substitutions *)
 let rec unify (t1: type_signature) (t2: type_signature) =
   match (t1.item, t2.item) with
   | TypeArrow (arg1, ret1), TypeArrow (arg2, ret2) ->
-      let%bind s1 = unify arg1 arg2 in
-      let%map s2 = unify (Substitution.apply s1 ret1) (Substitution.apply s1 ret2) in
-      Substitution.compose s2 s1
+      unify_lists [arg1; ret1] [arg2; ret2]
 
   | _, TypeVar n -> var_bind n t1
   | TypeVar n, _ -> var_bind n t2
@@ -157,19 +157,25 @@ let rec unify (t1: type_signature) (t2: type_signature) =
   | TypeIdent x, TypeIdent y when String.equal x y ->
       Ok Substitution.null
 
-  | TypeConstructor (x, x_args), TypeConstructor (y, y_args) when String.equal x y -> (
-      let folder acc x_ y_ =
-        let%bind s1 = acc in
-        let%map s2 = unify (Substitution.apply s1 x_) (Substitution.apply s1 y_) in
-        Substitution.compose s2 s1
-      in
-      let s = List.fold2 ~f:folder ~init:(Ok Substitution.null) x_args y_args in
-      match s with
-      | Ok (Ok subs) -> Ok subs
-      | Ok e -> e
-      | Unequal_lengths -> Error UnequalLengths
-  )
+  | TypeConstructor (x, x_args), TypeConstructor (y, y_args)
+    when String.equal x y ->
+      unify_lists x_args y_args
+
+  | TypeTuple xs, TypeTuple ys -> unify_lists xs ys
+
   | _ -> Error (TypeMismatch (t1, t2))
+
+(** Given two lists of types, attempt to unify each element pairwise and
+    aggregate the substitution mapping *)
+and unify_lists xs ys =
+  let folder acc x y =
+    let%bind s1 = acc in
+    let%map s2 = unify (Substitution.apply s1 x) (Substitution.apply s1 y) in
+    Substitution.compose s2 s1
+  in
+  match List.fold2 ~f:folder ~init:(Ok Substitution.null) xs ys with
+  | Ok x -> x
+  | _ -> Error UnequalLengths
 
 let%test_module "unify" = (module struct
   let%expect_test "Can unify ident with var" =
@@ -189,6 +195,13 @@ let%test_module "unify" = (module struct
     |> Result.map ~f:Map.length
     |> Result.iter ~f:(Stdio.printf "%d");
     [%expect {| 0 |}]
+
+  let%expect_test "Can unify two arrows complex arrows" =
+    let t1 = locate (TypeArrow (locate (TypeVar "a"), locate (TypeArrow (locate (TypeIdent "String"), locate (TypeIdent "Bool"))))) in
+    let t2 = locate (TypeArrow (locate (TypeIdent "Int"), locate (TypeArrow (locate (TypeVar "b"), locate (TypeIdent "Bool"))))) in
+    unify t1 t2
+    |> Result.iter ~f:(fun s -> Substitution.to_string s |> Stdio.print_endline);
+    [%expect {| a = Int, b = String |}]
 
   let%expect_test "Does not unify two arrows that are different" =
     let t1 = locate (TypeArrow (locate (TypeIdent "Int"), locate (TypeIdent "String"))) in
@@ -215,7 +228,16 @@ let%test_module "unify" = (module struct
     let t2 = locate (TypeConstructor ("Test", args2)) in
     unify t1 t2
     |> Result.iter ~f:(fun s -> Substitution.to_string s |> Stdio.print_endline);
-    [%expect {| val = Int, err = String |}]
+    [%expect {| a = Int, b = Bool, c = String |}]
+
+  let%expect_test "Can unify a generic and specialised tuple" =
+    let xs = [locate (TypeVar "a"); locate (TypeIdent "Bool"); locate (TypeVar "c")] in
+    let ys = [locate (TypeIdent "Int"); locate (TypeVar "b"); locate (TypeIdent "String")] in
+    let t1 = locate (TypeTuple xs) in
+    let t2 = locate (TypeTuple ys) in
+    unify t1 t2
+    |> Result.iter ~f:(fun s -> Substitution.to_string s |> Stdio.print_endline);
+    [%expect {| a = Int, b = Bool, c = String |}]
 end)
 
 let rec infer (env: Env.t) (expr: expression) =
