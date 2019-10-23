@@ -159,7 +159,7 @@ let generalise (env: Env.t) (t: Type.t) =
 
 let instantiate (scheme: Scheme.t) =
   match scheme with
-  | Forall (_, ({ item = TypeIdent _ } as t)) -> Ok t
+  | Forall (_, ({ item = TypeIdent _; _ } as t)) -> Ok t
   | _ -> Error (Unimplemented "instantiate")
 
 (** Given a type variable's name, and another type, get the substitutions *)
@@ -309,18 +309,18 @@ let arrow_type subs param_types return_type =
 
 let rec infer (env: Env.t) (expr: expression): ((Substitution.t * Type.t), err) Result.t =
   match expr.item with
+  | ExprUnit -> 
+      Ok (Substitution.null, locate TypeUnit)
   | ExprIdent id -> (
       match (Map.find env id) with
       | Some (t) -> instantiate t |> Result.map ~f:(fun t_ -> (Substitution.null, t_))
       | None -> Error (VariableNotFound { id; location = expr.location })
   )
-  | ExprFn (param_ids, body_expr) -> (
-      let (fn_env, param_types) = List.fold_map ~init:env ~f:(fun cur_env id -> (
-        let tv = new_type_var () in 
-        (Map.set cur_env id (Forall ([], tv)), tv)
-      )) param_ids in
+  | ExprFn (param_id, body_expr) -> (
+      let tvar = new_type_var () in
+      let fn_env = Map.set env ~key:param_id ~data:(Scheme.Forall ([], tvar)) in
       let%bind (subs, return_type) = infer fn_env body_expr in
-      Ok (subs, arrow_type subs param_types return_type)
+      Ok (subs, TypeArrow (Type.apply subs tvar, return_type) |> locate)
   )
   | ExprValBinding (pattern, value_expr, body_expr) -> (
     match pattern.item with
@@ -333,10 +333,20 @@ let rec infer (env: Env.t) (expr: expression): ((Substitution.t * Type.t), err) 
     )
     | _ -> Error (Unimplemented "infer val binding for pattern")
   )
-  | ExprApply (fn_expr, args) -> (
+  | ExprApply (fn_expr, arg_expr) -> (
+    let tvar = new_type_var () in
     let%bind (fn_subs, fn_type) = infer env fn_expr in
-
-
-    Error (Unimplemented "infer apply")
+    let%bind (body_subs, body_type) = infer (Env.apply fn_subs env) arg_expr in
+    let%bind rt_subs = unify (Type.apply body_subs fn_type) (TypeArrow (body_type, tvar) |> locate) in
+    Ok (Substitution.compose rt_subs (Substitution.compose body_subs fn_subs), Type.apply rt_subs tvar)
   )
   | _ -> Error (Unimplemented "infer")
+
+
+let%test_module "infer" = (module struct
+  let%expect_test "first try" =
+    let expr = ExprFn ("a", locate ExprUnit) |> locate in
+    infer (Env.empty) expr
+    |> Result.iter ~f:(fun (_subs, t) -> Stdio.print_endline (Type.to_string t));
+    [%expect {| t0 -> () |}]
+end)
